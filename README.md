@@ -28,10 +28,15 @@ make_shared比shared_ptr_with_new是因为make_shared只分配一次内存
 g++ -std=c++11 a.cpp -O3 -g
 
 avg_test_make_shared: 1148
+
 avg_test_shared_ptr_with_new: 1164
+
 avg_test_shared_ptr_with_pool: 407
+
 avg_test_allocate_shared: 279
+
 avg_test_new_delete: 1090
+
 avg_test_pool: 7
 
 各种方法的相互关系完全符合预期。
@@ -40,10 +45,15 @@ avg_test_pool: 7
 在vs2017+win10, x64 release上测试，情况颇有不同
 
 avg_test_make_shared: 723
+
 avg_test_shared_ptr_with_new: 799
+
 avg_test_shared_ptr_with_pool: 212
+
 avg_test_allocate_shared: 403
+
 avg_test_new_delete: 660
+
 avg_test_pool: 65
 
 这里令人十分不解的是，为什么allocate_shared会这么慢？
@@ -51,6 +61,7 @@ avg_test_pool: 65
 经过仔细检查，发现这是因为vs2017的allocate_shared实现有BUG。
 它在内部试图在allocator传给它的内存上place new一个std::_Align_type，由于此处用的是perfect-forwarding构造_Align_type，因此编译器认为此时需要做value-initialize，但是由于_Align_type没有构造函数， 最后编译器生成memset(addr, 0, sizeof(T))来做value-initialize。
 也就是说，vs2017的allocate_shared在每次调用T的构造函数之前，先做了一次memset(0)。就是这个memset(0)严重的降低了allocate_shared的性能。要修复这个BUG，要到vc的include目录找到type_traits文件，找到_Align_type的定义：
+
 template<class _Ty,
        size_t _Len>
        union _Align_type
@@ -71,10 +82,16 @@ template<class _Ty,
 
 修改了这个头文件之后再测试，结果如下：
 avg_test_make_shared: 736
+
 avg_test_shared_ptr_with_new: 802
+
 avg_test_shared_ptr_with_pool: 215
+
 avg_test_allocate_shared: 206
+
 avg_test_new_delete: 679
+
 avg_test_pool: 65
+
 
 可以看到allocate_shared符合预期的比shared_ptr_with_pool略快一点。这似乎是因为vc对小内存分配的优化做的特别好，因此shared_ptr_with_pool额外的那次小内存分配开销很小。
