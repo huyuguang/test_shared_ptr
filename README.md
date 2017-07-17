@@ -2,7 +2,9 @@
 
 在10G网络下，每秒网卡的数据包大致在1M左右，如果用shared_ptr管理内存，那么需要尽可能快的分配和释放内存。
 有3种方式得到shared_ptr：shared_ptr构造函数，make_shared，allocate_shared。
-从原理上来说，第一种方式需要先new一个对象，然后调用shared_ptr的构造函数，这个构造函数会再次调用一次new，分配一个小内存保存ref_count和deleter。
+从原理上来说：
+
+第一种方式需要先new一个对象，然后调用shared_ptr的构造函数，这个构造函数会再次调用一次new，分配一个小内存保存ref_count和deleter。
 new一个对象可以通过实现分配好的内存池来优化。
 
 第二种方式是直接由make_shared分配一块连续内存保存ref_count&deleter&object。因此这种方式无法利用预先分配的内存池。
@@ -10,9 +12,10 @@ new一个对象可以通过实现分配好的内存池来优化。
 第三种方式是通过allocator来分配一块连续内存，它的内存布局和make_shared类似，但是内存是allocator提供的，因此可以利用预先分配的内存池。
 
 通常c库都为小内存分配做了优化，因此shared_ptr的那次小内存分配通常耗时是比较小的。但是内存分配通常带锁。
-预分配的内存池的开销很小，主要是锁操作。
+同样预分配的内存池的开销很小，也主要是锁操作。
 
 以上几种方式的开销为：
+
 shared_ptr(new T)：一次中等大小内存的分配/释放+一个小内存分配/释放
 
 shared_ptr(pool.pop())：一次小内存分配/释放+带锁内存池分配/释放
@@ -74,11 +77,7 @@ avg_test_pool: 65
 也就是说，vs2017的allocate_shared在每次调用T的构造函数之前，先做了一次memset(0)。就是这个memset(0)严重的降低了allocate_shared的性能。要修复这个BUG，要到vc的include目录找到type_traits文件，找到_Align_type的定义：
 
 
-template<class _Ty,
-
-       size_t _Len>
-       
-       union _Align_type
+template<class _Ty, size_t _Len> union _Align_type
        
        {      // union with size _Len bytes and alignment of _Ty
        
@@ -91,11 +90,7 @@ template<class _Ty,
 
 给它增加一个空构造函数就可以了：
 
-template<class _Ty,
-
-       size_t _Len>
-       
-       union _Align_type
+template<class _Ty, size_t _Len> union _Align_type
        
        {      // union with size _Len bytes and alignment of _Ty
        
