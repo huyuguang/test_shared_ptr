@@ -1,20 +1,28 @@
-
-//
-
 #include <memory>
-#include <string>
 #include <iostream>
 #include <vector>
 #include <assert.h>
-#include <algorithm>
 #include <chrono>
 #include <mutex>
-#include <boost/noncopyable.hpp>
+#include <atomic>
+#include <algorithm>
+
 //#include <boost/make_shared.hpp>
 //#include <boost/shared_ptr.hpp>
 
-using namespace std;// boost;
+using namespace std;
 //using namespace boost;
+
+class SpinLock {
+    std::atomic_flag locked = ATOMIC_FLAG_INIT;
+public:
+    void lock() {
+        while (locked.test_and_set(std::memory_order_acquire)) { ; }
+    }
+    void unlock() {
+        locked.clear(std::memory_order_release);
+    }
+};
 
 struct noncopyable {
 protected:
@@ -29,62 +37,65 @@ private:
 
 class BlockPool : noncopyable {
 public:
-    BlockPool(size_t size) :size_(size) {}
+    BlockPool(size_t block_size) :block_size_(block_size) {}
     ~BlockPool() {
+        assert(total_count_ == datas_.size());
         for (size_t i = 0; i < datas_.size(); ++i) {
             free(datas_[i]);
         }
     }
-    inline size_t size() const { return size_; }
-    inline void* pop() {
+    size_t size() const { return block_size_; }
+    void* pop() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (datas_.empty()) {
-            size_t const kNextSize = 256;
-            reserve(kNextSize);
+            const size_t kNextSize = 1024;
+            for (size_t i = 0; i < kNextSize; ++i) {
+                void* p = malloc(block_size_);
+                datas_.push_back(p);
+            }
+            total_count_ += kNextSize;
         }
         void* p = datas_.back();
         datas_.pop_back();
         return p;
     }
-    inline void push(void* data) {
+    void push(void* data) {
         std::lock_guard<std::mutex> lock(mutex_);
         datas_.push_back(data);
     }
-    inline void reserve(size_t count) {
+    void reserve(size_t count) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (count <= datas_.size()) return;
         datas_.reserve(count);
         count -= datas_.size();
         for (size_t i = 0; i < count; ++i) {
-            void* p = malloc(size_);
+            void* p = malloc(block_size_);
             datas_.push_back(p);
         }
+        total_count_ += count;
     }
 private:
-    size_t const size_;
+    size_t const block_size_;
+    size_t total_count_{ 0 };
     std::vector<void*> datas_;
     std::mutex mutex_;
+    //SpinLock mutex_;
 };
 
 struct Packet : noncopyable {
-    Packet() {
-        init();
-    }
-    ~Packet() {
-        clean();
-    }
-    void init() {}
-    void clean() {}
-    char data_[1000];
+    Packet() { data_[0] = 0; }// = default;
+    ~Packet() = default;
+    char data_[1500];
 };
+
 
 const uint32_t kLoopCount = 1000 * 1000;
 
-BlockPool pool(sizeof(Packet) + 32);
+BlockPool pool(sizeof(Packet) + 64);
 
-std::vector<shared_ptr<Packet>> packets;
-
-void test1() {
+int64_t test_make_shared() {
+    std::vector<shared_ptr<Packet>> packets;
+    packets.reserve(kLoopCount);
     auto begin = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < kLoopCount; ++i) {
         auto packet = make_shared<Packet>();
@@ -93,10 +104,13 @@ void test1() {
     packets.clear();
     auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
-    std::cout << "make_shared: " << ms << "\n";
+    std::cout << "make_shared: " << ms << " ms\n";
+    return ms;
 }
 
-void test2() {
+int64_t test_shared_ptr_with_pool() {
+    std::vector<shared_ptr<Packet>> packets;
+    packets.reserve(kLoopCount);
     auto begin = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < kLoopCount; ++i) {
         Packet* p = (Packet*)pool.pop();
@@ -110,10 +124,13 @@ void test2() {
     packets.clear();
     auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
-    std::cout << "shared_ptr with pool: " << ms << "\n";
+    std::cout << "shared_ptr with pool: " << ms << " ms\n";
+    return ms;
 }
 
-void test22() {
+int64_t test_shared_ptr_with_new() {
+    std::vector<shared_ptr<Packet>> packets;
+    packets.reserve(kLoopCount);
     auto begin = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < kLoopCount; ++i) {
         shared_ptr<Packet> packet(new Packet);
@@ -122,7 +139,8 @@ void test22() {
     packets.clear();
     auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
-    std::cout << "shared_ptr with new: " << ms << "\n";
+    std::cout << "shared_ptr with new: " << ms << " ms\n";
+    return ms;
 }
 
 template <class T>
@@ -157,7 +175,9 @@ bool operator==(const Mallocator<T>&, const Mallocator<U>&) { return true; }
 template <class T, class U>
 bool operator!=(const Mallocator<T>&, const Mallocator<U>&) { return false; }
 
-void test3() {    
+int64_t test_allocate_shared() {
+    std::vector<shared_ptr<Packet>> packets;
+    packets.reserve(kLoopCount);
     Mallocator<Packet> alloc(&pool);
     auto begin = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < kLoopCount; ++i) {
@@ -167,51 +187,90 @@ void test3() {
     packets.clear();
     auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
-    std::cout << "allocate_shared: " << ms << "\n";    
+    std::cout << "allocate_shared: " << ms << " ms\n";
+    return ms;
 }
 
-void test4() {
-    std::vector<Packet*> raw_packets;
-    raw_packets.reserve(kLoopCount);
+int64_t test_new_delete() {
+    std::vector<Packet*> packets;
+    packets.reserve(kLoopCount);
     auto begin = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < kLoopCount; ++i) {
-        raw_packets.push_back(new Packet);
+        packets.push_back(new Packet);
     }
     for (uint32_t i = 0; i < kLoopCount; ++i) {
-        delete raw_packets[i];
+        delete packets[i];
     }
-    raw_packets.clear();
+    packets.clear();
     auto end = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
-    std::cout << "raw new&delete: " << ms << "\n";
+    std::cout << "new_delete: " << ms << " ms\n";
+    return ms;
+}
+
+int64_t test_pool() {
+    std::vector<Packet*> packets;
+    packets.reserve(kLoopCount);
+    auto begin = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < kLoopCount; ++i) {
+        packets.push_back((Packet*)pool.pop());
+    }
+    for (uint32_t i = 0; i < kLoopCount; ++i) {
+        pool.push(packets[i]);
+    }
+    packets.clear();
+    auto end = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
+    std::cout << "pool: " << ms << " ms\n";
+    return ms;
+}
+
+int64_t get_avg(std::vector<int64_t>& results) {
+    // remove min max
+    std::sort(results.begin(), results.end());
+    results.erase(results.begin());
+    results.pop_back();
+    int64_t total = 0;
+    for (size_t i = 1; i < results.size(); ++i) {
+        total += results[i];
+    }
+    return total / (results.size() - 2);
 }
 
 int main() {
-    for (int i = 0; i < 3; ++i) {
-        test1();
-    }
-    std::cout << "======\n";
+    std::cout << "loop for " << kLoopCount << " times to ceate and free shared_ptr\n\n";
+    
     pool.reserve(kLoopCount);
-    packets.reserve(kLoopCount);
 
-    for (int i = 0; i < 3; ++i) {
-        test2();
+    int const kTestCount = 10;
+    std::vector<int64_t> results_shared_ptr_with_new;
+    results_shared_ptr_with_new.reserve(kTestCount);
+    std::vector<int64_t> results_make_shared_ptr;
+    results_make_shared_ptr.reserve(kTestCount);
+    std::vector<int64_t> results_shared_ptr_with_pool;
+    results_shared_ptr_with_pool.reserve(kTestCount);
+    std::vector<int64_t> results_allocate_shared;
+    results_allocate_shared.reserve(kTestCount);
+    std::vector<int64_t> results_new_delete;
+    results_new_delete.reserve(kTestCount);
+    std::vector<int64_t> results_pool;
+    results_pool.reserve(kTestCount);
+
+    for (int i = 0; i < kTestCount; ++i) {
+        results_shared_ptr_with_new.push_back(test_shared_ptr_with_new());
+        results_make_shared_ptr.push_back(test_make_shared());
+        results_shared_ptr_with_pool.push_back(test_shared_ptr_with_pool());
+        results_allocate_shared.push_back(test_allocate_shared());
+        results_new_delete.push_back(test_new_delete());
+        results_pool.push_back(test_pool());
+        std::cout << "\n";
     }
-    std::cout << "======\n";
-
-    for (int i = 0; i < 3; ++i) {
-        test22();
-    }
-    std::cout << "======\n";
-
-    for (int i = 0; i < 3; ++i) {
-        test3();
-    }
-    std::cout << "======\n";
-
-    for (int i = 0; i < 3; ++i) {
-        test4();
-    }
-
+    
+    std::cout << "avg_test_make_shared: " << get_avg(results_make_shared_ptr) << "\n";
+    std::cout << "avg_test_shared_ptr_with_new: " << get_avg(results_shared_ptr_with_new) << "\n";
+    std::cout << "avg_test_shared_ptr_with_pool: " << get_avg(results_shared_ptr_with_pool) << "\n";
+    std::cout << "avg_test_allocate_shared: " << get_avg(results_allocate_shared) << "\n";
+    std::cout << "avg_test_new_delete: " << get_avg(results_new_delete) << "\n";
+    std::cout << "avg_test_pool: " << get_avg(results_pool) << "\n";
     return 0;
 }
