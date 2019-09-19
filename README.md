@@ -118,3 +118,7 @@ avg_test_pool: 65
 
 
 可以看到allocate_shared符合预期的比shared_ptr_with_pool略快一点。这似乎是因为vc对小内存分配的优化做的特别好，因此shared_ptr_with_pool额外的那次小内存分配开销很小。
+
+https://stackoverflow.com/questions/45072486/why-allocate-shared-and-make-shared-so-slow
+https://stackoverflow.com/questions/27484483/default-initialization-versus-zero-initialization
+https://stackoverflow.com/questions/45099019/why-c-use-memsetaddr-0-sizeoft-to-construct-a-object-standard-or-compiler/45099269?noredirect=1#comment77171187_45099269
